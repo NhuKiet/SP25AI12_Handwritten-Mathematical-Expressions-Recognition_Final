@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Math Recognition App</title>
+    <!-- Load MathJax -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script type="text/x-mathjax-config">
+        MathJax.Hub.Config({
+            tex2jax: {inlineMath: [['$','$'], ['\\(','\\)']]},
+            messageStyle: "none"
+        });
+    </script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-container {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+        .upload-container:hover {
+            border-color: #888;
+            cursor: pointer;
+        }
+        #file-input {
+            display: none;
+        }
+        .button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .button:hover {
+            background-color: #45a049;
+        }
+        #result-container {
+            margin-top: 30px;
+            display: none;
+        }
+        .result-box {
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .math-output {
+            font-size: 18px;
+            margin-top: 10px;
+            padding: 15px;
+            background-color: white;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+        #preview-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #preview-image {
+            max-width: 100%;
+            max-height: 300px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            display: none;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+        .loading:after {
+            content: " .";
+            animation: dots 1s steps(5, end) infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: " ."; }
+            40% { content: " .."; }
+            60% { content: " ..."; }
+            80%, 100% { content: " ...."; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Mathematical Expression Recognition</h1>
+    
+    <div class="upload-container" id="upload-area">
+        <p>Click or drag an image containing a mathematical expression</p>
+        <input type="file" id="file-input" accept=".jpg, .jpeg, .png, .bmp">
+        <button class="button" id="upload-button">Select Image</button>
+    </div>
+    
+    <div id="preview-container">
+        <img id="preview-image" alt="Image preview">
+    </div>
+    
+    <div class="loading" id="loading">
+        Processing image
+    </div>
+    
+    <div id="result-container">
+        <div class="result-box">
+            <h3>Recognition Result:</h3>
+            <p><strong>LaTeX:</strong> <span id="latex-result"></span></p>
+            <h3>Rendered Expression:</h3>
+            <div class="math-output" id="math-output"></div>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const uploadArea = document.getElementById('upload-area');
+            const fileInput = document.getElementById('file-input');
+            const uploadButton = document.getElementById('upload-button');
+            const previewImage = document.getElementById('preview-image');
+            const resultContainer = document.getElementById('result-container');
+            const latexResult = document.getElementById('latex-result');
+            const mathOutput = document.getElementById('math-output');
+            const loading = document.getElementById('loading');
+            
+            // Trigger file input when clicking on the upload area or button
+            uploadArea.addEventListener('click', function() {
+                fileInput.click();
+            });
+            
+            uploadButton.addEventListener('click', function(e) {
+                e.stopPropagation(); // Prevent double triggering
+                fileInput.click();
+            });
+            
+            // Handle drag and drop
+            uploadArea.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#45a049';
+            });
+            
+            uploadArea.addEventListener('dragleave', function() {
+                uploadArea.style.borderColor = '#ccc';
+            });
+            
+            uploadArea.addEventListener('drop', function(e) {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#ccc';
+                
+                if (e.dataTransfer.files.length) {
+                    fileInput.files = e.dataTransfer.files;
+                    handleFileSelect();
+                }
+            });
+            
+            // Handle file selection
+            fileInput.addEventListener('change', handleFileSelect);
+            
+            function handleFileSelect() {
+                const file = fileInput.files[0];
+                if (!file) return;
+                
+                // Show image preview
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    previewImage.src = e.target.result;
+                    previewImage.style.display = 'inline-block';
+                };
+                reader.readAsDataURL(file);
+                
+                // Upload file to server
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                // Show loading
+                loading.style.display = 'block';
+                resultContainer.style.display = 'none';
+                
+                fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    loading.style.display = 'none';
+                    
+                    if (data.error) {
+                        alert('Error: ' + data.error);
+                        return;
+                    }
+                    
+                    // Display results
+                    resultContainer.style.display = 'block';
+                    latexResult.textContent = data.latex;
+                    
+                    // Display rendered math
+                    mathOutput.innerHTML = '$$' + data.latex + '$$';
+                    MathJax.Hub.Queue(["Typeset", MathJax.Hub, mathOutput]);
+                })
+                .catch(error => {
+                    loading.style.display = 'none';
+                    alert('Error: ' + error);
+                });
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+alpha: 0.9
+beam_size: 5
+d_model: 64
+dim_feedforward: 256
+dropout: 0.1
+growth_rate: 32
+learning_rate: 0.001
+max_len: 64
+nhead: 4
+num_decoder_layers: 3
+num_layers: 3
+patience: 5
