@@ -4,14 +4,15 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from torch import FloatTensor, LongTensor
-from ..datamodule import vocab
-from .pos_enc import WordPosEnc
-from .transformer.arm import AttentionRefinementModule
-from .transformer.transformer_decoder import (
+
+from comer.datamodule import vocab, vocab_size
+from comer.model.pos_enc import WordPosEnc
+from comer.model.transformer.arm import AttentionRefinementModule
+from comer.model.transformer.transformer_decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from ..utils.generation_utils import DecodeModel
+from comer.utils.generation_utils import DecodeModel
 
 
 def _build_transformer_decoder(
@@ -42,7 +43,6 @@ def _build_transformer_decoder(
 class Decoder(DecodeModel):
     def __init__(
         self,
-        vocab_size: int,
         d_model: int,
         nhead: int,
         num_decoder_layers: int,

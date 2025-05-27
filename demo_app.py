@@ -10,12 +10,15 @@ import numpy as np
 import cv2
 from torchvision import transforms
 import uuid
+import threading
+import queue
 
 # Add all necessary module directories to path
 current_dir = os.path.abspath('.')
 sys.path.append(current_dir)
 sys.path.append(os.path.join(current_dir, 'BTTR'))
 sys.path.append(os.path.join(current_dir, 'PosFormer'))
+sys.path.append(os.path.join(current_dir, 'SwinCoMER'))
 sys.path.append(os.path.join(current_dir, 'CoMER'))
 
 # Suppress PyTorch Lightning warnings (there are version mismatches)
@@ -28,13 +31,22 @@ AVAILABLE_MODELS = {}
 
 # Import models
 try:
-    from CoMER.comer.lit_comer_swin import LitCoMER
-    from CoMER.comer.datamodule import vocab as comer_vocab
+    from SwinCoMER.comer.lit_comer_swin import LitCoMER as SwinCoMER_LitCoMER_Class
+    from SwinCoMER.comer.datamodule import vocab as SwinCoMER_vocab_module
+    AVAILABLE_MODELS['swincomer'] = True
+    print("SwinCoMER model is available")
+except ImportError as e:
+    AVAILABLE_MODELS['swincomer'] = False
+    print(f"Warning: SwinCoMER module not found or has errors: {str(e)}")
+
+try:
+    from CoMER.comer.lit_comer import LitCoMER as PlainCoMER_LitCoMER_Class
+    from CoMER.comer.datamodule import vocab as PlainCoMER_vocab_module
     AVAILABLE_MODELS['comer'] = True
-    print("CoMER model is available")
+    print("CoMER model (plain) is available")
 except ImportError as e:
     AVAILABLE_MODELS['comer'] = False
-    print(f"Warning: CoMER module not found or has errors: {str(e)}")
+    print(f"Warning: CoMER module (plain) not found or has errors: {str(e)}")
 
 try:
     # Try different possible import paths for BTTR
@@ -53,12 +65,12 @@ except ImportError as e:
 try:
     # Try different possible import paths for PosFormer
     try:
-        from PosFormer.Pos_Former.lit_posformer import LitPosFormer
-        from PosFormer.Pos_Former.datamodule import vocab as posformer_vocab
+        from PosFormer.Pos_Former.lit_posformer import LitPosFormer as PosFormer_LitPosFormer_Class
+        from PosFormer.Pos_Former.datamodule import vocab as PosFormer_vocab_module
     except ImportError:
         # Alternative import path
-        from Pos_Former.lit_posformer import LitPosFormer
-        from Pos_Former.datamodule import vocab as posformer_vocab
+        from Pos_Former.lit_posformer import LitPosFormer as PosFormer_LitPosFormer_Class
+        from Pos_Former.datamodule import vocab as PosFormer_vocab_module
     
     AVAILABLE_MODELS['posformer'] = True
     print("PosFormer model is available")
@@ -79,8 +91,13 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Model configurations
 MODEL_CONFIGS = {
+    'swincomer': {
+        'checkpoint': 'SwinCoMER/checkpoints/ComerSwin-epoch=02-val_ExpRate=0.4550.ckpt',
+        'loaded': False,
+        'model': None
+    },
     'comer': {
-        'checkpoint': 'CoMER/checkpoints/ComerSwin-epoch=02-val_ExpRate=0.4550.ckpt',
+        'checkpoint': 'CoMER/lightning_logs/version_0/checkpoints/epoch=151-step=57151-val_ExpRate=0.6365.ckpt',
         'loaded': False,
         'model': None
     },
@@ -128,29 +145,37 @@ def load_model(model_name, use_cpu=False):
         # Determine device to use
         target_device = torch.device('cpu') if use_cpu else device
         
-        if model_name == 'comer':
-            MODEL_CONFIGS[model_name]['model'] = LitCoMER.load_from_checkpoint(
+        if model_name == 'swincomer':
+            MODEL_CONFIGS[model_name]['model'] = SwinCoMER_LitCoMER_Class.load_from_checkpoint(
                 MODEL_CONFIGS[model_name]['checkpoint'],
+                map_location=target_device
+            )
+        elif model_name == 'comer':
+            MODEL_CONFIGS[model_name]['model'] = PlainCoMER_LitCoMER_Class.load_from_checkpoint(
+                MODEL_CONFIGS[model_name]['checkpoint'],
+                max_length=10,
                 map_location=target_device
             )
         elif model_name == 'bttr':
             MODEL_CONFIGS[model_name]['model'] = LitBTTR.load_from_checkpoint(
                 MODEL_CONFIGS[model_name]['checkpoint'],
+                max_length=10,
                 map_location=target_device
             )
         elif model_name == 'posformer':
             print("Loading PosFormer model (you may see Lightning version migration warnings)")
             try:
                 # Try loading on selected device
-                MODEL_CONFIGS[model_name]['model'] = LitPosFormer.load_from_checkpoint(
+                MODEL_CONFIGS[model_name]['model'] = PosFormer_LitPosFormer_Class.load_from_checkpoint(
                     MODEL_CONFIGS[model_name]['checkpoint'],
+                    max_length=10,
                     map_location=target_device
                 )
             except torch.cuda.OutOfMemoryError:
                 # If out of memory, force CPU
                 print("CUDA out of memory when loading PosFormer. Loading on CPU instead.")
-                MODEL_CONFIGS[model_name]['model'] = LitPosFormer.load_from_checkpoint(
-                    MODEL_CONFIGS[model_name]['checkpoint'], 
+                MODEL_CONFIGS[model_name]['model'] = PosFormer_LitPosFormer_Class.load_from_checkpoint(
+                    MODEL_CONFIGS[model_name]['checkpoint'], max_length=10,
                     map_location=torch.device('cpu')
                 )
         
@@ -173,7 +198,7 @@ def load_model(model_name, use_cpu=False):
         return False
 
 # Image preprocessing functions for each model
-def preprocess_for_comer(img_path):
+def preprocess_for_swincomer(img_path):
     img = Image.open(img_path).convert("RGB")
     img_resized = img.resize((256, 256), Image.LANCZOS)
     img_tensor = transforms.functional.to_tensor(img_resized)
@@ -185,17 +210,26 @@ def preprocess_for_comer(img_path):
     img_batched = img_normalized.unsqueeze(0)
     return img_batched
 
+def preprocess_for_comer(img_path):
+    img = Image.open(img_path).convert("L")  # Convert to grayscale
+    img_resized = img.resize((224, 224), Image.LANCZOS)
+    img_tensor = transforms.functional.to_tensor(img_resized)
+    # Note: No need for RGB normalization since we're using grayscale
+    img_batched = img_tensor.unsqueeze(0)
+    return img_batched
+
 def preprocess_for_bttr(img_path):
     img = Image.open(img_path).convert("L")  # Convert to grayscale
-    img_tensor = transforms.ToTensor()(img)
+    img_resized = img.resize((224, 224), Image.LANCZOS)
+    img_tensor = transforms.ToTensor()(img_resized)
     if img_tensor.dim() == 2:
         img_tensor = img_tensor.unsqueeze(0)  # Add channel dimension if needed
-    # Do NOT add batch dimension for BTTR - it expects [C,H,W]
     return img_tensor
 
 def preprocess_for_posformer(img_path):
     img = Image.open(img_path).convert("L")  # Convert to grayscale
-    img_tensor = transforms.ToTensor()(img)
+    img_resized = img.resize((224, 224), Image.LANCZOS)
+    img_tensor = transforms.ToTensor()(img_resized)
     if img_tensor.dim() == 2:
         img_tensor = img_tensor.unsqueeze(0)  # Add channel dimension
     
@@ -210,8 +244,8 @@ def preprocess_for_posformer(img_path):
     return img_tensor, img_mask
 
 # Model inference functions
-def inference_comer(img_tensor):
-    model = MODEL_CONFIGS['comer']['model']
+def inference_swincomer(img_tensor):
+    model = MODEL_CONFIGS['swincomer']['model']
     img_tensor = img_tensor.to(device)
     B, _, H, W = img_tensor.shape
     img_mask = torch.zeros((B, H, W), dtype=torch.bool, device=device)
@@ -220,22 +254,189 @@ def inference_comer(img_tensor):
         hyps = model.approximate_joint_search(img_tensor, img_mask)
         if hyps:
             best_hyp = hyps[0]
-            latex_str = comer_vocab.indices2label(best_hyp.seq)
+            latex_str = SwinCoMER_vocab_module.indices2label(best_hyp.seq)
             return latex_str
         return "No result found"
 
+def inference_comer(img_tensor):
+    model = MODEL_CONFIGS['comer']['model']
+    # Determine device model is on
+    model_device = next(model.parameters()).device
+    
+    # Create a queue for the result
+    result_queue = queue.Queue()
+    
+    def process_inference():
+        try:
+            # Clear memory before running inference
+            clear_gpu_memory()
+            
+            with torch.no_grad():
+                try:
+                    # Try GPU first
+                    if torch.cuda.is_available():
+                        model.to('cuda')
+                        img_tensor_gpu = img_tensor.to('cuda')
+                        B, _, H, W = img_tensor_gpu.shape
+                        img_mask = torch.zeros((B, H, W), dtype=torch.bool, device='cuda')
+                        
+                        hyps = model.approximate_joint_search(img_tensor_gpu, img_mask)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PlainCoMER_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                            return
+                    else:
+                        # If no GPU, use CPU
+                        print("No GPU available, using CPU for CoMER")
+                        model.to('cpu')
+                        img_tensor_cpu = img_tensor.to('cpu')
+                        B, _, H, W = img_tensor_cpu.shape
+                        img_mask = torch.zeros((B, H, W), dtype=torch.bool, device='cpu')
+                        
+                        hyps = model.approximate_joint_search(img_tensor_cpu, img_mask)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PlainCoMER_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                            return
+                    
+                    result_queue.put(("error", "No result found"))
+                except torch.cuda.OutOfMemoryError:
+                    # If CUDA out of memory, fall back to CPU
+                    print("CUDA out of memory during CoMER inference. Falling back to CPU...")
+                    try:
+                        model.to('cpu')
+                        img_tensor_cpu = img_tensor.to('cpu')
+                        B, _, H, W = img_tensor_cpu.shape
+                        img_mask = torch.zeros((B, H, W), dtype=torch.bool, device='cpu')
+                        clear_gpu_memory()  # Clear GPU memory after moving to CPU
+                        
+                        hyps = model.approximate_joint_search(img_tensor_cpu, img_mask)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PlainCoMER_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                        else:
+                            result_queue.put(("error", "No result found"))
+                    except Exception as e:
+                        print(f"CPU fallback error: {str(e)}")
+                        result_queue.put(("error", f"Error during CPU fallback: {str(e)}"))
+                except Exception as e:
+                    print(f"CoMER inference error: {str(e)}")
+                    traceback.print_exc()
+                    result_queue.put(("error", f"Error: {str(e)}"))
+        except Exception as e:
+            result_queue.put(("error", f"Error: {str(e)}"))
+    
+    # Start processing in a separate thread
+    thread = threading.Thread(target=process_inference)
+    thread.start()
+    
+    # Wait for result with timeout
+    timeout = 30  # 30 seconds timeout
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        try:
+            status, result = result_queue.get_nowait()
+            if status == "success":
+                return result
+            else:
+                return result
+        except queue.Empty:
+            time.sleep(0.1)  # Short sleep to prevent CPU overuse
+    
+    # If we get here, processing timed out
+    return "Error: CoMER processing timed out. Try using a simpler image or another model."
+
 def inference_bttr(img_tensor):
     model = MODEL_CONFIGS['bttr']['model']
-    # BTTR expects a 3D tensor [C,H,W], not 4D [B,C,H,W]
-    # If we have a batch dimension, remove it
-    if img_tensor.dim() == 4:
-        img_tensor = img_tensor.squeeze(0)
     
-    img_tensor = img_tensor.to(device)
+    # Create a queue for the result
+    result_queue = queue.Queue()
     
-    with torch.no_grad():
-        latex_str = model.beam_search(img_tensor)
-        return latex_str if latex_str else "No result found"
+    def process_inference():
+        try:
+            # Clear memory before running inference
+            clear_gpu_memory()
+            
+            with torch.no_grad():
+                try:
+                    # Try GPU first
+                    if torch.cuda.is_available():
+                        model.to('cuda')
+                        # BTTR expects a 3D tensor [C,H,W], not 4D [B,C,H,W]
+                        if img_tensor.dim() == 4:
+                            img_tensor_gpu = img_tensor.squeeze(0).to('cuda')
+                        else:
+                            img_tensor_gpu = img_tensor.to('cuda')
+                        
+                        latex_str = model.beam_search(img_tensor_gpu, max_len=model.hparams.max_len)
+                        if latex_str:
+                            result_queue.put(("success", latex_str))
+                            return
+                    else:
+                        # If no GPU, use CPU
+                        print("No GPU available, using CPU for BTTR")
+                        model.to('cpu')
+                        if img_tensor.dim() == 4:
+                            img_tensor_cpu = img_tensor.squeeze(0).to('cpu')
+                        else:
+                            img_tensor_cpu = img_tensor.to('cpu')
+                        
+                        latex_str = model.beam_search(img_tensor_cpu, max_len=model.hparams.max_len)
+                        if latex_str:
+                            result_queue.put(("success", latex_str))
+                            return
+                    
+                    result_queue.put(("error", "No result found"))
+                except torch.cuda.OutOfMemoryError:
+                    # If CUDA out of memory, fall back to CPU
+                    print("CUDA out of memory during BTTR inference. Falling back to CPU...")
+                    try:
+                        model.to('cpu')
+                        if img_tensor.dim() == 4:
+                            img_tensor_cpu = img_tensor.squeeze(0).to('cpu')
+                        else:
+                            img_tensor_cpu = img_tensor.to('cpu')
+                        clear_gpu_memory()  # Clear GPU memory after moving to CPU
+                        
+                        latex_str = model.beam_search(img_tensor_cpu, max_len=model.hparams.max_len)
+                        if latex_str:
+                            result_queue.put(("success", latex_str))
+                        else:
+                            result_queue.put(("error", "No result found"))
+                    except Exception as e:
+                        print(f"CPU fallback error: {str(e)}")
+                        result_queue.put(("error", f"Error during CPU fallback: {str(e)}"))
+                except Exception as e:
+                    print(f"BTTR inference error: {str(e)}")
+                    traceback.print_exc()
+                    result_queue.put(("error", f"Error: {str(e)}"))
+        except Exception as e:
+            result_queue.put(("error", f"Error: {str(e)}"))
+    
+    # Start processing in a separate thread
+    thread = threading.Thread(target=process_inference)
+    thread.start()
+    
+    # Wait for result with timeout
+    timeout = 30  # 30 seconds timeout
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        try:
+            status, result = result_queue.get_nowait()
+            if status == "success":
+                return result
+            else:
+                return result
+        except queue.Empty:
+            time.sleep(0.1)  # Short sleep to prevent CPU overuse
+    
+    # If we get here, processing timed out
+    return "Error: BTTR processing timed out. Try using a simpler image or another model."
 
 def inference_posformer(img_tensor, img_mask):
     model = MODEL_CONFIGS['posformer']['model']
@@ -247,37 +448,89 @@ def inference_posformer(img_tensor, img_mask):
     img_tensor = img_tensor.to(model_device)
     img_mask = img_mask.to(model_device)
     
-    try:
-        # Clear memory before running inference
-        clear_gpu_memory()
-        
-        with torch.no_grad():
-            try:
-                hyps = model.approximate_joint_search(img_tensor, img_mask)
-                if hyps:
-                    best_hyp = hyps[0]
-                    latex_str = posformer_vocab.indices2label(best_hyp.seq)
-                    return latex_str
-                return "No result found"
-            except torch.cuda.OutOfMemoryError:
-                # If CUDA out of memory during inference, try to move model to CPU
-                print("CUDA out of memory during PosFormer inference. Trying CPU...")
-                
-                # Move model to CPU for this inference
-                model.to("cpu")
-                img_tensor = img_tensor.to("cpu")
-                img_mask = img_mask.to("cpu")
-                
-                hyps = model.approximate_joint_search(img_tensor, img_mask)
-                if hyps:
-                    best_hyp = hyps[0]
-                    latex_str = posformer_vocab.indices2label(best_hyp.seq)
-                    return latex_str
-                return "No result found"
-    except Exception as e:
-        print(f"PosFormer inference error: {str(e)}")
-        traceback.print_exc()
-        return f"Error: {str(e)}"
+    # Create a queue for the result
+    result_queue = queue.Queue()
+    
+    def process_inference():
+        try:
+            # Clear memory before running inference
+            clear_gpu_memory()
+            
+            with torch.no_grad():
+                try:
+                    # Try GPU first
+                    if torch.cuda.is_available():
+                        model.to('cuda')
+                        img_tensor_gpu = img_tensor.to('cuda')
+                        img_mask_gpu = img_mask.to('cuda')
+                        
+                        hyps = model.approximate_joint_search(img_tensor_gpu, img_mask_gpu)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PosFormer_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                            return
+                    else:
+                        # If no GPU, use CPU
+                        print("No GPU available, using CPU for PosFormer")
+                        model.to('cpu')
+                        img_tensor_cpu = img_tensor.to('cpu')
+                        img_mask_cpu = img_mask.to('cpu')
+                        
+                        hyps = model.approximate_joint_search(img_tensor_cpu, img_mask_cpu)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PosFormer_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                            return
+                    
+                    result_queue.put(("error", "No result found"))
+                except torch.cuda.OutOfMemoryError:
+                    # If CUDA out of memory, fall back to CPU
+                    print("CUDA out of memory during PosFormer inference. Falling back to CPU...")
+                    try:
+                        model.to('cpu')
+                        img_tensor_cpu = img_tensor.to('cpu')
+                        img_mask_cpu = img_mask.to('cpu')
+                        clear_gpu_memory()  # Clear GPU memory after moving to CPU
+                        
+                        hyps = model.approximate_joint_search(img_tensor_cpu, img_mask_cpu)
+                        if hyps:
+                            best_hyp = hyps[0]
+                            latex_str = PosFormer_vocab_module.indices2label(best_hyp.seq)
+                            result_queue.put(("success", latex_str))
+                        else:
+                            result_queue.put(("error", "No result found"))
+                    except Exception as e:
+                        print(f"CPU fallback error: {str(e)}")
+                        result_queue.put(("error", f"Error during CPU fallback: {str(e)}"))
+                except Exception as e:
+                    print(f"PosFormer inference error: {str(e)}")
+                    traceback.print_exc()
+                    result_queue.put(("error", f"Error: {str(e)}"))
+        except Exception as e:
+            result_queue.put(("error", f"Error: {str(e)}"))
+    
+    # Start processing in a separate thread
+    thread = threading.Thread(target=process_inference)
+    thread.start()
+    
+    # Wait for result with timeout
+    timeout = 30  # 30 seconds timeout
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        try:
+            status, result = result_queue.get_nowait()
+            if status == "success":
+                return result
+            else:
+                return result
+        except queue.Empty:
+            time.sleep(0.1)  # Short sleep to prevent CPU overuse
+    
+    # If we get here, processing timed out
+    return "Error: PosFormer processing timed out. Try using a simpler image or another model."
 
 @app.route('/')
 def index():
@@ -341,7 +594,10 @@ def upload_file():
                 clear_gpu_memory()
                 
                 # Preprocess image according to model
-                if model_name == 'comer':
+                if model_name == 'swincomer':
+                    img_tensor = preprocess_for_swincomer(filepath)
+                    latex = inference_swincomer(img_tensor)
+                elif model_name == 'comer':
                     img_tensor = preprocess_for_comer(filepath)
                     latex = inference_comer(img_tensor)
                 elif model_name == 'bttr':

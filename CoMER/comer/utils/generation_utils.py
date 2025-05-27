@@ -4,8 +4,8 @@ from typing import List, Tuple
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from ..datamodule import vocab
-from ..utils.utils import Hypothesis, ce_loss, to_tgt_output
+from comer.datamodule import vocab, vocab_size
+from comer.utils.utils import Hypothesis, ce_loss, to_tgt_output
 from einops import rearrange
 from einops.einops import repeat
 from torch import FloatTensor, LongTensor
@@ -48,7 +48,6 @@ class DecodeModel(pl.LightningModule):
         alpha: float,
         early_stopping: bool,
         temperature: float,
-        vocab_size: int,
     ) -> List[Hypothesis]:
         """run beam search to decode
 
@@ -103,7 +102,6 @@ class DecodeModel(pl.LightningModule):
             beam_size=beam_size,
             max_len=max_len,
             temperature=temperature,
-            vocab_size=vocab_size,
         )
 
         # reverse half last
@@ -158,7 +156,6 @@ class DecodeModel(pl.LightningModule):
         beam_size: int,
         max_len: int,
         temperature: float,
-        vocab_size: int,
     ) -> Tuple[List[LongTensor], FloatTensor]:
         """inner beam search
 

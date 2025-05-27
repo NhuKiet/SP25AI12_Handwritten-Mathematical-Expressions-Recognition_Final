@@ -1,106 +1,200 @@
 import os
-from typing import List, Optional
-import zipfile
 from dataclasses import dataclass
+from typing import List, Optional, Tuple
+from zipfile import ZipFile
+
+import numpy as np
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader
-from .dataset import LatexDataset
+from comer.datamodule.dataset import CROHMEDataset
+from PIL import Image
+from torch import FloatTensor, LongTensor
+from torch.utils.data.dataloader import DataLoader
+
 from .vocab import vocab
+
+Data = List[Tuple[str, Image.Image, List[str]]]
+
+MAX_SIZE = 32e4  # change here accroading to your GPU memory
+
+# load data
+def data_iterator(
+    data: Data,
+    batch_size: int,
+    batch_Imagesize: int = MAX_SIZE,
+    maxlen: int = 200,
+    maxImagesize: int = MAX_SIZE,
+):
+    fname_batch = []
+    feature_batch = []
+    label_batch = []
+    feature_total = []
+    label_total = []
+    fname_total = []
+    biggest_image_size = 0
+
+    data.sort(key=lambda x: x[1].size[0] * x[1].size[1])
+
+    i = 0
+    for fname, fea, lab in data:
+        size = fea.size[0] * fea.size[1]
+        fea = np.array(fea)
+        if size > biggest_image_size:
+            biggest_image_size = size
+        batch_image_size = biggest_image_size * (i + 1)
+        if len(lab) > maxlen:
+            print("sentence", i, "length bigger than", maxlen, "ignore")
+        elif size > maxImagesize:
+            print(
+                f"image: {fname} size: {fea.shape[0]} x {fea.shape[1]} =  bigger than {maxImagesize}, ignore"
+            )
+        else:
+            if batch_image_size > batch_Imagesize or i == batch_size:  # a batch is full
+                fname_total.append(fname_batch)
+                feature_total.append(feature_batch)
+                label_total.append(label_batch)
+                i = 0
+                biggest_image_size = size
+                fname_batch = []
+                feature_batch = []
+                label_batch = []
+                fname_batch.append(fname)
+                feature_batch.append(fea)
+                label_batch.append(lab)
+                i += 1
+            else:
+                fname_batch.append(fname)
+                feature_batch.append(fea)
+                label_batch.append(lab)
+                i += 1
+
+    # last batch
+    fname_total.append(fname_batch)
+    feature_total.append(feature_batch)
+    label_total.append(label_batch)
+    print("total ", len(feature_total), "batch data loaded")
+    return list(zip(fname_total, feature_total, label_total))
+
+
+def extract_data(archive: ZipFile, dir_name: str) -> Data:
+    """Extract all data need for a dataset from zip archive
+
+    Args:
+        archive (ZipFile):
+        dir_name (str): dir name in archive zip (eg: train, test_2014......)
+
+    Returns:
+        Data: list of tuple of image and formula
+    """
+    with archive.open(f"data/{dir_name}/caption.txt", "r") as f:
+        captions = f.readlines()
+    data = []
+    for line in captions:
+        tmp = line.decode().strip().split()
+        img_name = tmp[0]
+        formula = tmp[1:]
+        with archive.open(f"data/{dir_name}/img/{img_name}.bmp", "r") as f:
+            # move image to memory immediately, avoid lazy loading, which will lead to None pointer error in loading
+            img = Image.open(f).copy()
+        data.append((img_name, img, formula))
+
+    print(f"Extract data from: {dir_name}, with data size: {len(data)}")
+
+    return data
+
 
 @dataclass
 class Batch:
-    img_ids: List[str]
-    images: torch.Tensor  # [B, 1, H, W]
-    mask: torch.Tensor  # [B, H, W]
-    token_ids: List[List[int]]  # [B, L]
+    img_bases: List[str]  # [b,]
+    imgs: FloatTensor  # [b, 1, H, W]
+    mask: LongTensor  # [b, H, W]
+    indices: List[List[int]]  # [b, l]
 
     def __len__(self) -> int:
-        return len(self.img_ids)
+        return len(self.img_bases)
 
     def to(self, device) -> "Batch":
         return Batch(
-            img_ids=self.img_ids,
-            images=self.images.to(device),
+            img_bases=self.img_bases,
+            imgs=self.imgs.to(device),
             mask=self.mask.to(device),
-            token_ids=self.token_ids,
+            indices=self.indices,
         )
 
+
 def collate_fn(batch):
-    img_ids, images, token_ids = zip(*batch)
+    assert len(batch) == 1
+    batch = batch[0]
+    fnames = batch[0]
+    images_x = batch[1]
+    seqs_y = [vocab.words2indices(x) for x in batch[2]]
 
-    max_height = max(img.size(1) for img in images)
-    max_width = max(img.size(2) for img in images)
-    n_samples = len(images)
+    heights_x = [s.size(1) for s in images_x]
+    widths_x = [s.size(2) for s in images_x]
 
-    padded_images = torch.zeros(n_samples, 3, max_height, max_width)
-    mask = torch.ones(n_samples, max_height, max_width, dtype=torch.bool)
+    n_samples = len(heights_x)
+    max_height_x = max(heights_x)
+    max_width_x = max(widths_x)
 
-    for idx, img in enumerate(images):
-        h, w = img.shape[1], img.shape[2]
-        
-        if img.shape[0] == 1:
-            img = img.repeat(3, 1, 1)
-        padded_images[idx, :, :h, :w] = img
-        mask[idx, :h, :w] = 0
+    x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
+    x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
+    for idx, s_x in enumerate(images_x):
+        x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
+        x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-    return Batch(
-        img_ids=list(img_ids),
-        images=padded_images,
-        mask=mask,
-        token_ids=list(token_ids),
-    )
+    # return fnames, x, x_mask, seqs_y
+    return Batch(fnames, x, x_mask, seqs_y)
 
-class LatexDataModule(pl.LightningDataModule):
+
+def build_dataset(archive, folder: str, batch_size: int):
+    data = extract_data(archive, folder)
+    return data_iterator(data, batch_size)
+
+
+class CROHMEDatamodule(pl.LightningDataModule):
     def __init__(
         self,
-        zipfile_path: str = "data.zip",
-        train_batch_size: int = 16,
+        zipfile_path: str = f"{os.path.dirname(os.path.realpath(__file__))}/../../data.zip",
+        test_year: str = "2014",
+        train_batch_size: int = 8,
         eval_batch_size: int = 4,
         num_workers: int = 5,
+        scale_aug: bool = False,
     ) -> None:
         super().__init__()
+        assert isinstance(test_year, str)
         self.zipfile_path = zipfile_path
+        self.test_year = test_year
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
         self.num_workers = num_workers
+        self.scale_aug = scale_aug
 
         print(f"Load data from: {self.zipfile_path}")
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.temp_dir = "temp_data"
-        os.makedirs(self.temp_dir, exist_ok=True)
-        with zipfile.ZipFile(self.zipfile_path, 'r') as zip_ref:
-            zip_ref.extractall(self.temp_dir)
-
-        if stage == "fit" or stage is None:
-            self.train_dataset = LatexDataset(
-                root_dir=os.path.join(self.temp_dir, "data", "train"),
-                split="train",
-            )
-            self.val_dataset = LatexDataset(
-                root_dir=os.path.join(self.temp_dir, "data", "val"),
-                split="val",
-            )
-
-        if stage == "test" or stage is None:
-            # Chỉ tải các tập test của CROHME
-            self.test_datasets = {}
-            test_splits = ["2014", "2016", "2019"]  # Bỏ "test"
-            for split in test_splits:
-                test_dir = os.path.join(self.temp_dir, "data", split)
-                if os.path.exists(test_dir):
-                    self.test_datasets[split] = LatexDataset(
-                        root_dir=test_dir,
-                        split=split,
-                    )
-                else:
-                    print(f"Test split {split} not found in {self.zipfile_path}")
+        with ZipFile(self.zipfile_path) as archive:
+            if stage == "fit" or stage is None:
+                self.train_dataset = CROHMEDataset(
+                    build_dataset(archive, "train", self.train_batch_size),
+                    True,
+                    self.scale_aug,
+                )
+                self.val_dataset = CROHMEDataset(
+                    build_dataset(archive, self.test_year, self.eval_batch_size),
+                    False,
+                    self.scale_aug,
+                )
+            if stage == "test" or stage is None:
+                self.test_dataset = CROHMEDataset(
+                    build_dataset(archive, self.test_year, self.eval_batch_size),
+                    False,
+                    self.scale_aug,
+                )
 
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
-            batch_size=self.train_batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
@@ -109,31 +203,15 @@ class LatexDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
-            batch_size=self.eval_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
 
     def test_dataloader(self):
-        # Trả về danh sách các DataLoader cho từng tập test
-        dataloaders = []
-        for split, dataset in self.test_datasets.items():
-            dataloaders.append(
-                DataLoader(
-                    dataset,
-                    batch_size=self.eval_batch_size,
-                    shuffle=False,
-                    num_workers=self.num_workers,
-                    collate_fn=collate_fn,
-                )
-            )
-        return dataloaders
-
-    def teardown(self, stage: Optional[str] = None) -> None:
-        import shutil
-        if os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir)
-
-    def get_vocab_size(self):
-        return self.train_dataset.get_vocab_size()
+        return DataLoader(
+            self.test_dataset,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+        )

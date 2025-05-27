@@ -122,6 +122,17 @@
                                         <label class="form-check-label" for="posformerCheck">
                                             PosFormer
                                         </label>
+                                        <small class="text-warning d-block">
+                                            <i class="bi bi-clock"></i> Note: This model may take longer to process
+                                        </small>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div id="swincomer-container" class="form-check">
+                                        <input class="form-check-input model-checkbox" type="checkbox" value="swincomer" id="swincomerCheck">
+                                        <label class="form-check-label" for="swincomerCheck">
+                                            SwinCoMER
+                                        </label>
                                     </div>
                                 </div>
                             </div>
@@ -258,6 +269,7 @@
                     updateModelAvailability('comer', data.comer);
                     updateModelAvailability('bttr', data.bttr);
                     updateModelAvailability('posformer', data.posformer);
+                    updateModelAvailability('swincomer', data.swincomer);
                     
                     // Enable at least one available model
                     Object.keys(data).forEach(model => {
@@ -465,7 +477,8 @@
                 const names = {
                     'comer': 'CoMER Model',
                     'bttr': 'BTTR Model',
-                    'posformer': 'PosFormer Model'
+                    'posformer': 'PosFormer Model',
+                    'swincomer': 'SwinCoMER Model'
                 };
                 return names[modelName] || modelName;
             }
