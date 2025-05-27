@@ -26,13 +26,14 @@ A comprehensive web application for recognizing mathematical expressions in imag
 - CUDA-compatible GPU (recommended)
 - 8GB+ RAM
 - Windows/Linux/MacOS
+- Git LFS (for handling large files)
 
 ## Installation
 
-1. **Clone the repository and its submodules**:
+1. **Clone the repository**:
    ```bash
-   git clone [your-repo-url]
-   cd [your-repo-name]
+   git clone https://github.com/[your-username]/[repo-name].git
+   cd [repo-name]
    ```
 
 2. **Install dependencies**:
@@ -40,7 +41,32 @@ A comprehensive web application for recognizing mathematical expressions in imag
    pip install -r requirements.txt
    ```
 
-3. **Install model packages**:
+3. **Download model checkpoints**:
+   
+   The model checkpoints are large files and are not included in the repository. Download them from the following locations:
+
+   - **CoMER**:
+     - File: `epoch=151-step=57151-val_ExpRate=0.6365.ckpt`
+     - Size: ~50MB
+     - Place in: `CoMER/lightning_logs/version_0/checkpoints/`
+     - [Download Link]
+
+   - **SwinCoMER**:
+     - File: `ComerSwin-epoch=02-val_ExpRate=0.4550.ckpt`
+     - Place in: `SwinCoMER/checkpoints/`
+     - [Download Link]
+
+   - **BTTR**:
+     - File: `epoch=197-step=69300-val_ExpRate=0.4477.ckpt`
+     - Place in: `BTTR/checkpoints/`
+     - [Download Link]
+
+   - **PosFormer**:
+     - File: `best.ckpt`
+     - Place in: `PosFormer/lightning_logs/version_0/checkpoints/`
+     - [Download Link]
+
+4. **Install model packages**:
    ```bash
    pip install -e ./CoMER
    pip install -e ./BTTR
@@ -48,25 +74,20 @@ A comprehensive web application for recognizing mathematical expressions in imag
    pip install -e ./SwinCoMER
    ```
 
-4. **Verify directory structure**:
+5. **Verify directory structure**:
    ```
    ├── demo_app.py             # Main Flask application
    ├── templates/              # HTML templates
    │   └── index.html         # Web interface
-   ├── uploads/               # Uploaded images directory
+   ├── uploads/               # Uploaded images directory (created automatically)
    ├── CoMER/                 # CoMER model
    ├── SwinCoMER/            # SwinCoMER model
    ├── BTTR/                 # BTTR model
    ├── PosFormer/            # PosFormer model
    ├── requirements.txt      # Python dependencies
+   ├── .gitignore           # Git ignore rules
    └── README.md            # This file
    ```
-
-5. **Download model checkpoints**:
-   - CoMER: Place in `CoMER/lightning_logs/version_0/checkpoints/`
-   - SwinCoMER: Place in `SwinCoMER/checkpoints/`
-   - BTTR: Place in `BTTR/checkpoints/`
-   - PosFormer: Place in `PosFormer/lightning_logs/version_0/checkpoints/`
 
 ## Usage
 
@@ -139,4 +160,34 @@ A comprehensive web application for recognizing mathematical expressions in imag
 
 - CoMER, SwinCoMER, BTTR, and PosFormer model authors
 - PyTorch and PyTorch Lightning teams
-- Flask web framework 
+- Flask web framework
+
+## Development Notes
+
+### Repository Management
+
+1. **Large Files**:
+   - Model checkpoints are not included in the repository
+   - Download them separately from the provided links
+   - The `.gitignore` file is configured to exclude large binary files
+
+2. **Virtual Environment**:
+   - It's recommended to use a virtual environment:
+     ```bash
+     python -m venv venv
+     source venv/bin/activate  # Linux/Mac
+     venv\Scripts\activate     # Windows
+     ```
+
+3. **Contributing**:
+   - Fork the repository
+   - Create a feature branch
+   - Do not commit model checkpoints or large binary files
+   - Submit pull requests for code changes only
+
+### Common Issues
+
+1. **Git Push Errors**:
+   - If you get timeout errors while pushing, check for large files
+   - Use `git status` to verify no checkpoint files are being tracked
+   - Use `git clean -fd` to remove untracked files (careful!) 
