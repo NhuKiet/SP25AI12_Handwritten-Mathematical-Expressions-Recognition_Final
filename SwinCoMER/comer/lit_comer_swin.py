@@ -7,7 +7,7 @@ from torch import FloatTensor, LongTensor
 import time
 import editdistance
 
-from .datamodule import Batch
+from .datamodule import Batch, vocab
 from .model.comer_swin import CoMER
 from .utils.utils import (ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out)
 from torchvision.transforms import transforms
@@ -22,8 +22,13 @@ class LitCoMER(pl.LightningModule):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         dc: int = 128,
-        cross_coverage: bool = False,
-        self_coverage: bool = False,
+        # Defaults enable the Attention Refinement Module. Checkpoints trained
+        # before this change carry cross_coverage/self_coverage=False in their
+        # saved hyperparameters, and load_from_checkpoint restores those, so
+        # existing checkpoints keep loading with ARM disabled as they were
+        # trained.
+        cross_coverage: bool = True,
+        self_coverage: bool = True,
         beam_size: int = 5,
         max_len: int = 200,
         alpha: float = 0.6,
@@ -51,6 +56,10 @@ class LitCoMER(pl.LightningModule):
         self.comer_model.decoder.word_embed[0] = torch.nn.Embedding(vocab_size, d_model)
         self.comer_model.decoder.proj = torch.nn.Linear(d_model, vocab_size)
 
+        # Registered as a submodule so torchmetrics handles device placement
+        # and distributed reduction. Drives checkpoint selection via val_ExpRate.
+        self.val_exprate_recorder = ExpRateRecorder()
+
         # Khởi tạo ExpRateRecorder, test_outputs và test_gts cho từng tập test
         self.exprate_recorders = {}
         self.test_outputs_dict = {}
@@ -65,13 +74,6 @@ class LitCoMER(pl.LightningModule):
         loss = ce_loss(out_hat, out)
         self.log("train_loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=len(batch))
 
-        predicted = out_hat.argmax(-1).cpu().numpy()
-        target = out.cpu().numpy()
-        for i in range(len(batch)):
-            pred_seq = self.trainer.datamodule.train_dataset.decode(predicted[i].tolist())
-            target_seq = self.trainer.datamodule.train_dataset.decode(target[i].tolist())
-            #print(f"Training - Image {batch.img_ids[i]}: Predicted: {pred_seq}, Target: {target_seq}")
-
         return loss
 
     def validation_step(self, batch: Batch, _):
@@ -79,27 +81,41 @@ class LitCoMER(pl.LightningModule):
         out_hat = self(batch.images, batch.mask, tgt)
         loss = ce_loss(out_hat, out)
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=len(batch))
-        
-        # accuracy out_hat vs out
-        mask = (out != 0)  # PAD_IDX = 0
-        cer = (out_hat.argmax(-1) != out).masked_fill(~mask, 0).reshape(2, len(batch), -1).permute(1, 0, 2).flatten(1,2).sum(-1) / mask.reshape(2, len(batch), -1).permute(1, 0, 2).flatten(1,2).sum(-1)
-        seq_acc = (cer == 0.0).float().mean()
-        
-        predicted = out_hat.argmax(-1).cpu().numpy()
-        target = out.cpu().numpy()
-        for i in range(len(batch)):
-            pred_seq = self.trainer.datamodule.val_dataset.decode(predicted[i].tolist())
-            target_seq = self.trainer.datamodule.val_dataset.decode(target[i].tolist())
-            #print(f"Validation - Image {batch.img_ids[i]}: Predicted: {pred_seq}, Target: {target_seq}")
 
+        # Teacher-forced sequence accuracy: the decoder is handed the ground
+        # truth prefix at every step, so this is far more optimistic than what
+        # the model produces when it decodes on its own. Useful as a cheap
+        # training signal, but never as a checkpoint selection criterion.
+        # out is [2b, l]: the first b rows are l2r, the next b are r2l. A sample
+        # counts as correct only when both directions are exact.
+        pad_mask = out != vocab.PAD_IDX
+        errs = ((out_hat.argmax(-1) != out) & pad_mask).sum(-1)  # [2b]
+        errs = errs.view(2, -1).sum(0)                           # [b]
+        seq_acc = (errs == 0).float().mean()
         self.log(
-            "val_ExpRate",
+            "val_token_seq_acc",
             seq_acc,
             on_step=False,
             on_epoch=True,
-            prog_bar=True,
+            prog_bar=False,
             sync_dist=True,
-            batch_size=len(batch)
+            batch_size=len(batch),
+        )
+
+        # The real metric: autoregressive beam search, exactly the procedure
+        # test_step uses. This is what val_ExpRate must mean for checkpoint
+        # selection to be meaningful. It runs a full beam search per validation
+        # batch, so validation is now much slower than a forward pass - cap it
+        # with Trainer(limit_val_batches=...) if that is too expensive.
+        hyps = self.approximate_joint_search(batch.images, batch.mask)
+        self.val_exprate_recorder([h.seq for h in hyps], batch.token_ids)
+        self.log(
+            "val_ExpRate",
+            self.val_exprate_recorder,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=len(batch),
         )
 
     def test_step(self, batch: Batch, batch_idx, dataloader_idx=0):

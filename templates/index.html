@@ -84,74 +84,43 @@
                 <!-- Model Selection -->
                 <div class="card mb-4">
                     <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">1. Select Models</h5>
+                        <h5 class="mb-0">1. Select Model</h5>
                     </div>
                     <div class="card-body">
                         <div id="model-loading" class="text-center">
                             <div class="spinner-border spinner-border-sm text-primary" role="status">
                                 <span class="visually-hidden">Loading...</span>
                             </div>
-                            <span class="ms-2">Checking available models...</span>
+                            <span class="ms-2">Checking model availability...</span>
                         </div>
                         
                         <div id="no-models-available" class="alert alert-warning" style="display: none;">
-                            <strong>Warning:</strong> No models are currently available. Please check your installation.
+                            <strong>Warning:</strong> The SwinCoMER model is not available. Please check your installation.
                         </div>
                         
                         <div id="models-container" style="display: none;">
                             <div class="row">
-                                <div class="col-md-4">
-                                    <div id="comer-container" class="form-check">
-                                        <input class="form-check-input model-checkbox" type="checkbox" value="comer" id="comerCheck" checked>
-                                        <label class="form-check-label" for="comerCheck">
-                                            CoMER
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="col-md-4">
-                                    <div id="bttr-container" class="form-check">
-                                        <input class="form-check-input model-checkbox" type="checkbox" value="bttr" id="bttrCheck">
-                                        <label class="form-check-label" for="bttrCheck">
-                                            BTTR
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="col-md-4">
-                                    <div id="posformer-container" class="form-check">
-                                        <input class="form-check-input model-checkbox" type="checkbox" value="posformer" id="posformerCheck">
-                                        <label class="form-check-label" for="posformerCheck">
-                                            PosFormer
-                                        </label>
-                                        <small class="text-warning d-block">
-                                            <i class="bi bi-clock"></i> Note: This model may take longer to process
-                                        </small>
-                                    </div>
-                                </div>
-                                <div class="col-md-4">
+                                <div class="col-md-12">
                                     <div id="swincomer-container" class="form-check">
-                                        <input class="form-check-input model-checkbox" type="checkbox" value="swincomer" id="swincomerCheck">
+                                        <input class="form-check-input model-checkbox" type="checkbox" value="swincomer" id="swincomerCheck" checked>
                                         <label class="form-check-label" for="swincomerCheck">
                                             SwinCoMER
                                         </label>
                                     </div>
                                 </div>
                             </div>
-                            <div class="mt-2">
-                                <button id="selectAllBtn" class="btn btn-sm btn-outline-primary">Select All</button>
-                                <button id="clearAllBtn" class="btn btn-sm btn-outline-secondary">Clear All</button>
-                            </div>
-                            
+
                             <!-- Memory usage warning -->
                             <div class="mt-3 alert alert-info">
                                 <div class="form-check form-switch">
                                     <input class="form-check-input" type="checkbox" id="useCpuSwitch">
                                     <label class="form-check-label" for="useCpuSwitch">
-                                        Use CPU for memory-intensive models (slower but more reliable)
+                                        Use CPU instead of GPU (slower but more reliable)
                                     </label>
                                 </div>
                                 <small class="d-block mt-1">
-                                    <i class="bi bi-info-circle"></i> 
-                                    Running multiple models may cause GPU memory issues. If you experience errors, try running one model at a time or enable CPU mode.
+                                    <i class="bi bi-info-circle"></i>
+                                    If you run out of GPU memory, enable CPU mode.
                                 </small>
                             </div>
                         </div>
@@ -202,7 +171,7 @@
                     <div class="spinner-border text-primary" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
-                    <p class="mt-2">Processing image with selected models...</p>
+                    <p class="mt-2">Processing image with SwinCoMER...</p>
                 </div>
             </div>
         </div>
@@ -237,8 +206,6 @@
             const resultsContainer = document.getElementById('results-container');
             const resultsContent = document.getElementById('results-content');
             const loading = document.getElementById('loading');
-            const selectAllBtn = document.getElementById('selectAllBtn');
-            const clearAllBtn = document.getElementById('clearAllBtn');
             const modelCheckboxes = document.querySelectorAll('.model-checkbox');
             const modelLoading = document.getElementById('model-loading');
             const noModelsAvailable = document.getElementById('no-models-available');
@@ -265,19 +232,14 @@
                     
                     modelsContainer.style.display = 'block';
                     
-                    // Update model checkboxes
-                    updateModelAvailability('comer', data.comer);
-                    updateModelAvailability('bttr', data.bttr);
-                    updateModelAvailability('posformer', data.posformer);
+                    // Update model checkbox
                     updateModelAvailability('swincomer', data.swincomer);
-                    
-                    // Enable at least one available model
-                    Object.keys(data).forEach(model => {
-                        if (data[model]) {
-                            document.getElementById(model + 'Check').checked = true;
-                        }
-                    });
-                    
+
+                    // Select the model when it is available
+                    if (data.swincomer) {
+                        document.getElementById('swincomerCheck').checked = true;
+                    }
+
                     updateProcessButton();
                 })
                 .catch(error => {
@@ -304,22 +266,6 @@
             }
             
             // Model selection logic
-            selectAllBtn.addEventListener('click', function() {
-                modelCheckboxes.forEach(checkbox => {
-                    if (!checkbox.disabled) {
-                        checkbox.checked = true;
-                    }
-                });
-                updateProcessButton();
-            });
-            
-            clearAllBtn.addEventListener('click', function() {
-                modelCheckboxes.forEach(checkbox => {
-                    checkbox.checked = false;
-                });
-                updateProcessButton();
-            });
-            
             modelCheckboxes.forEach(checkbox => {
                 checkbox.addEventListener('change', updateProcessButton);
             });
@@ -475,9 +421,6 @@
             
             function getModelDisplayName(modelName) {
                 const names = {
-                    'comer': 'CoMER Model',
-                    'bttr': 'BTTR Model',
-                    'posformer': 'PosFormer Model',
                     'swincomer': 'SwinCoMER Model'
                 };
                 return names[modelName] || modelName;

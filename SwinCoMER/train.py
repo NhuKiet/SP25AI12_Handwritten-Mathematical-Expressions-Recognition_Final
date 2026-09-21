@@ -34,8 +34,12 @@ def main():
         dim_feedforward=2048,
         dropout=0.1,
         dc=128,
-        cross_coverage=False,
-        self_coverage=False,
+        # Both must be True for the Attention Refinement Module to be built at
+        # all - see _build_transformer_decoder in comer/model/decoder.py. With
+        # both False the decoder is a plain Transformer and the coverage
+        # mechanism that defines CoMER is never applied.
+        cross_coverage=True,
+        self_coverage=True,
         beam_size=8,
         max_len=200,
         alpha=0.6,
