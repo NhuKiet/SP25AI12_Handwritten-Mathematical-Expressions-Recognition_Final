@@ -30,6 +30,7 @@ runs/
 
 # Virtual Environment
 venv/
+.venv/
 env/
 ENV/
 

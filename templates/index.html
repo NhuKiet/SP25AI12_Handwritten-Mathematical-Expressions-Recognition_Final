@@ -1,431 +1,256 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Math Expression Recognition Demo</title>
-    <!-- Load Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Load MathJax -->
-    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <title>SwinCoMER — Nhận dạng công thức toán viết tay</title>
+
     <script>
         window.MathJax = {
-            tex: {
-                inlineMath: [['$', '$'], ['\\(', '\\)']],
-                displayMath: [['$$', '$$'], ['\\[', '\\]']]
-            },
-            startup: {
-                ready: () => {
-                    MathJax.startup.defaultReady();
-                    window.MathJaxReady = true;
-                }
-            }
+            tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
+            svg: { fontCache: 'global' },
+            startup: { typeset: false }
         };
     </script>
+    <script id="MathJax-script" async
+            src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
     <style>
-        .upload-container {
-            border: 2px dashed #ccc;
-            padding: 20px;
-            text-align: center;
-            margin-bottom: 20px;
-            border-radius: 5px;
-            cursor: pointer;
+        :root {
+            --bg: #f6f4ef; --panel: #fff; --fg: #24211c; --fg2: #6b655c;
+            --line: #ddd7cc; --accent: #7f8f68; --danger: #b8654f;
+            --radius: 12px;
         }
-        .upload-container:hover {
-            border-color: #0d6efd;
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1b1a18; --panel: #24221f; --fg: #e8e4dc; --fg2: #a8a196;
+                --line: #3a3733; --accent: #8f9a7e;
+            }
         }
-        #file-input {
-            display: none;
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 32px 16px 64px; background: var(--bg); color: var(--fg);
+            font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         }
-        #preview-image {
-            max-width: 100%;
-            max-height: 300px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            display: none;
-            margin: 0 auto;
+        .wrap { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+        h1 { margin: 0; font-size: 26px; font-weight: 600; }
+        .sub { margin: 0; color: var(--fg2); font-size: 14px; }
+
+        .notice, .error {
+            margin: 0; padding: 10px 14px; border-radius: 10px; font-size: 13.5px;
+            border-left: 3px solid var(--accent);
+            background: color-mix(in srgb, var(--accent) 12%, transparent);
         }
-        .model-card {
-            transition: all 0.3s;
+        .error { border-left-color: var(--danger);
+                 background: color-mix(in srgb, var(--danger) 12%, transparent); }
+        [hidden] { display: none !important; }
+
+        .drop {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 6px; min-height: 190px; padding: 24px; text-align: center; cursor: pointer;
+            border: 2px dashed var(--line); border-radius: 14px; background: var(--panel);
+            transition: border-color .15s, background .15s;
         }
-        .model-card:hover {
-            transform: scale(1.02);
+        .drop:hover, .drop:focus-visible, .drop.drag { border-color: var(--accent); }
+        .drop strong { font-weight: 500; }
+        .drop small { color: var(--fg2); }
+
+        .spinner {
+            width: 16px; height: 16px; border-radius: 50%; display: inline-block;
+            border: 2px solid var(--line); border-top-color: var(--accent);
+            animation: spin .7s linear infinite; vertical-align: -3px; margin-right: 8px;
         }
-        .latex-display {
-            overflow-x: auto;
-            font-family: monospace;
-            white-space: nowrap;
-            padding: 10px;
-            background-color: #f8f9fa;
-            border-radius: 5px;
-            margin-bottom: 10px;
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .result { display: grid; grid-template-columns: minmax(0,250px) minmax(0,1fr); gap: 16px; align-items: start; }
+        .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
+        .panel h2 { margin: 0 0 12px; font-size: 11.5px; font-weight: 600; letter-spacing: .05em;
+                    text-transform: uppercase; color: var(--fg2); }
+        .thumb { width: 100%; border-radius: 8px; background: #fff; }
+
+        /* MathJax sizes itself to the expression; a long one scrolls inside
+           the panel instead of widening the grid column. */
+        .render { overflow-x: auto; overflow-y: hidden; padding: 6px 2px 12px; }
+        .empty { margin: 0; color: var(--fg2); font-size: 14px; }
+
+        code.latex {
+            display: block; padding: 10px 12px; border-radius: 8px; margin-bottom: 10px;
+            background: var(--bg); color: var(--fg2); white-space: pre-wrap; word-break: break-word;
+            font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
         }
-        .math-output {
-            padding: 15px;
-            background-color: #fff;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            overflow-x: auto;
-            min-height: 60px;
+        button {
+            padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px;
+            background: transparent; color: var(--fg2); font-size: 13px; cursor: pointer;
         }
-        .unavailable-model {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        button:hover { border-color: var(--accent); color: var(--fg); }
+
+        dl.meta { display: flex; flex-wrap: wrap; gap: 18px; margin: 14px 0 0;
+                  padding-top: 12px; border-top: 1px solid var(--line); }
+        dl.meta dt { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg2); }
+        dl.meta dd { margin: 2px 0 0; font-size: 14px; }
+
+        label.cpu { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--fg2); }
+
+        @media (max-width: 720px) { .result { grid-template-columns: minmax(0,1fr); } }
     </style>
 </head>
 <body>
-    <div class="container my-5">
-        <h1 class="text-center mb-4">Mathematical Expression Recognition</h1>
-        
-        <div class="row">
-            <div class="col-lg-8 mx-auto">
-                <!-- Model Selection -->
-                <div class="card mb-4">
-                    <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">1. Select Model</h5>
-                    </div>
-                    <div class="card-body">
-                        <div id="model-loading" class="text-center">
-                            <div class="spinner-border spinner-border-sm text-primary" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <span class="ms-2">Checking model availability...</span>
-                        </div>
-                        
-                        <div id="no-models-available" class="alert alert-warning" style="display: none;">
-                            <strong>Warning:</strong> The SwinCoMER model is not available. Please check your installation.
-                        </div>
-                        
-                        <div id="models-container" style="display: none;">
-                            <div class="row">
-                                <div class="col-md-12">
-                                    <div id="swincomer-container" class="form-check">
-                                        <input class="form-check-input model-checkbox" type="checkbox" value="swincomer" id="swincomerCheck" checked>
-                                        <label class="form-check-label" for="swincomerCheck">
-                                            SwinCoMER
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
+<div class="wrap">
+    <header>
+        <h1>Nhận dạng công thức toán viết tay</h1>
+        <p class="sub">
+            SwinCoMER — tải lên ảnh <strong>một biểu thức</strong>, nhận lại LaTeX.
+            Ảnh chụp cả trang nhiều dòng sẽ cho kết quả sai; hãy cắt từng biểu thức.
+        </p>
+    </header>
 
-                            <!-- Memory usage warning -->
-                            <div class="mt-3 alert alert-info">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="useCpuSwitch">
-                                    <label class="form-check-label" for="useCpuSwitch">
-                                        Use CPU instead of GPU (slower but more reliable)
-                                    </label>
-                                </div>
-                                <small class="d-block mt-1">
-                                    <i class="bi bi-info-circle"></i>
-                                    If you run out of GPU memory, enable CPU mode.
-                                </small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Image Upload -->
-                <div class="card mb-4">
-                    <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">2. Upload Image</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="upload-container" id="upload-area">
-                            <p class="mb-2">Click or drag an image containing a mathematical expression</p>
-                            <p class="text-muted small">Supported formats: JPG, PNG, BMP</p>
-                            <input type="file" id="file-input" accept=".jpg, .jpeg, .png, .bmp">
-                            <button class="btn btn-primary" id="upload-button">Select Image</button>
-                        </div>
-                        
-                        <div class="text-center mt-3">
-                            <img id="preview-image" class="img-fluid" alt="Image preview">
-                        </div>
-                        
-                        <div class="mt-3 text-center">
-                            <button id="process-button" class="btn btn-success btn-lg" disabled>
-                                Process Image
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Results Section -->
-                <div id="results-container" style="display: none;">
-                    <div class="card mb-4">
-                        <div class="card-header bg-primary text-white">
-                            <h5 class="mb-0">3. Recognition Results</h5>
-                        </div>
-                        <div class="card-body">
-                            <div id="results-content">
-                                <!-- Results will be displayed here -->
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Loading Spinner -->
-                <div id="loading" class="text-center my-4" style="display: none;">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
-                    </div>
-                    <p class="mt-2">Processing image with SwinCoMER...</p>
-                </div>
-            </div>
-        </div>
+    <p class="notice" id="status" hidden></p>
+
+    <div class="drop" id="drop" role="button" tabindex="0" aria-label="Chọn ảnh công thức">
+        <input type="file" id="file" accept="image/png,image/jpeg,image/bmp" hidden>
+        <span id="dropIdle">
+            <strong>Kéo thả ảnh công thức vào đây</strong><br>
+            <small>hoặc bấm để chọn — PNG, JPG, BMP</small>
+        </span>
+        <span id="dropBusy" hidden><span class="spinner"></span>Đang nhận dạng…</span>
     </div>
-    
-    <!-- Templates for results -->
-    <template id="result-template">
-        <div class="model-result mb-4">
-            <h4 class="model-name"></h4>
-            <div class="latex-display"></div>
-            <h5>Rendered Expression:</h5>
-            <div class="math-output"></div>
+
+    <label class="cpu">
+        <input type="checkbox" id="useCpu">
+        Dùng CPU thay vì GPU (chậm hơn nhưng chắc chắn hơn)
+    </label>
+
+    <p class="error" id="error" role="alert" hidden></p>
+
+    <section class="result" id="result" hidden>
+        <div class="panel">
+            <h2>Ảnh đã nhận</h2>
+            <img class="thumb" id="thumb" alt="Ảnh công thức đã tải lên">
         </div>
-        <hr>
-    </template>
-    
-    <!-- Error template -->
-    <template id="error-template">
-        <div class="alert alert-danger"></div>
-    </template>
-    
-    <!-- JavaScript -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            // Elements
-            const uploadArea = document.getElementById('upload-area');
-            const fileInput = document.getElementById('file-input');
-            const uploadButton = document.getElementById('upload-button');
-            const previewImage = document.getElementById('preview-image');
-            const processButton = document.getElementById('process-button');
-            const resultsContainer = document.getElementById('results-container');
-            const resultsContent = document.getElementById('results-content');
-            const loading = document.getElementById('loading');
-            const modelCheckboxes = document.querySelectorAll('.model-checkbox');
-            const modelLoading = document.getElementById('model-loading');
-            const noModelsAvailable = document.getElementById('no-models-available');
-            const modelsContainer = document.getElementById('models-container');
-            const useCpuSwitch = document.getElementById('useCpuSwitch');
-            
-            // Check available models
-            fetchAvailableModels();
-            
-            function fetchAvailableModels() {
-                fetch('/available_models')
-                .then(response => response.json())
-                .then(data => {
-                    modelLoading.style.display = 'none';
-                    
-                    // Check if any models are available
-                    const hasAvailableModels = Object.values(data).some(available => available);
-                    
-                    if (!hasAvailableModels) {
-                        noModelsAvailable.style.display = 'block';
-                        processButton.disabled = true;
-                        return;
-                    }
-                    
-                    modelsContainer.style.display = 'block';
-                    
-                    // Update model checkbox
-                    updateModelAvailability('swincomer', data.swincomer);
+        <div class="panel">
+            <h2>Công thức</h2>
+            <div class="render" id="render"></div>
+            <div id="latexBox" hidden>
+                <code class="latex" id="latex"></code>
+                <button id="copy">Chép LaTeX</button>
+            </div>
+            <dl class="meta">
+                <div><dt>Thời gian</dt><dd id="mTime">—</dd></div>
+                <div><dt>Thiết bị</dt><dd id="mDevice">—</dd></div>
+                <!-- Beam-search log-probability. Not calibrated, so it ranks
+                     one result against another rather than meaning anything on
+                     its own — labelled "điểm", never shown as a percentage. -->
+                <div><dt>Điểm</dt><dd id="mScore">—</dd></div>
+            </dl>
+        </div>
+    </section>
+</div>
 
-                    // Select the model when it is available
-                    if (data.swincomer) {
-                        document.getElementById('swincomerCheck').checked = true;
-                    }
+<script>
+const $ = id => document.getElementById(id);
+const drop = $("drop"), fileInput = $("file");
 
-                    updateProcessButton();
-                })
-                .catch(error => {
-                    console.error('Error fetching available models:', error);
-                    modelLoading.style.display = 'none';
-                    noModelsAvailable.style.display = 'block';
-                });
-            }
-            
-            function updateModelAvailability(modelName, isAvailable) {
-                const container = document.getElementById(modelName + '-container');
-                const checkbox = document.getElementById(modelName + 'Check');
-                
-                if (!isAvailable) {
-                    container.classList.add('unavailable-model');
-                    checkbox.disabled = true;
-                    checkbox.checked = false;
-                    container.title = `${getModelDisplayName(modelName)} is not available`;
-                } else {
-                    container.classList.remove('unavailable-model');
-                    checkbox.disabled = false;
-                    container.removeAttribute('title');
-                }
-            }
-            
-            // Model selection logic
-            modelCheckboxes.forEach(checkbox => {
-                checkbox.addEventListener('change', updateProcessButton);
+// Asked on load so a missing checkpoint is visible before the user picks a
+// file, instead of being discovered by a failed upload.
+fetch("/status").then(r => r.json()).then(showStatus).catch(() => {});
+
+function showStatus(s) {
+    let msg = "";
+    if (!s.import_ok)            msg = `Chưa import được package 'comer' (${s.import_error}). Chạy: pip install -e ./SwinCoMER`;
+    else if (!s.checkpoint_exists) msg = `Không tìm thấy checkpoint tại "${s.checkpoint}".`;
+    else if (s.last_error)       msg = s.last_error;
+    // Measured, not guessed: ~107s per image on CPU at beam_size 2 with the
+    // bundled CROHME sample. Saying "a few seconds" here would have people
+    // reloading the page thinking it had hung.
+    else if (!s.cuda_available)  msg = `Không thấy GPU — chạy trên CPU, mỗi ảnh mất khoảng 1,5–2 phút (beam_size=${s.beam_size}). Hãy kiên nhẫn chờ.`;
+    if (msg) { $("status").textContent = msg; $("status").hidden = false; }
+    else $("status").hidden = true;
+}
+
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+});
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("drag"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+drop.addEventListener("drop", e => {
+    e.preventDefault(); drop.classList.remove("drag");
+    if (e.dataTransfer.files[0]) send(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", e => {
+    if (e.target.files[0]) send(e.target.files[0]);
+    e.target.value = "";   // so picking the same file twice still fires
+});
+
+function busy(on) {
+    $("dropIdle").hidden = on;
+    $("dropBusy").hidden = !on;
+    drop.style.cursor = on ? "progress" : "pointer";
+}
+
+async function send(file) {
+    busy(true);
+    $("error").hidden = true;
+    $("result").hidden = true;
+
+    const form = new FormData();
+    form.append("file", file);
+    form.append("use_cpu", $("useCpu").checked);
+
+    try {
+        const res = await fetch("/upload", { method: "POST", body: form });
+        const data = await res.json();
+        // The server puts an actionable reason in `error` for 400/503/507.
+        // Showing the status code instead would throw that away.
+        if (!res.ok) throw new Error(data.error || `Lỗi ${res.status}`);
+        render(file, data);
+    } catch (err) {
+        $("error").textContent = err.message;
+        $("error").hidden = false;
+    } finally {
+        busy(false);
+        fetch("/status").then(r => r.json()).then(showStatus).catch(() => {});
+    }
+}
+
+function render(file, data) {
+    $("thumb").src = URL.createObjectURL(file);
+    $("mTime").textContent = data.elapsed_ms + " ms";
+    $("mDevice").textContent = data.device;
+    $("mScore").textContent = data.score.toFixed(3);
+
+    const latex = (data.latex || "").trim();
+    $("latexBox").hidden = !latex;
+
+    if (!latex) {
+        // An empty beam is a real outcome, not an error: the model ran and
+        // had nothing to say about this image.
+        $("render").innerHTML = '<p class="empty">Mô hình chạy xong nhưng không đưa ra giả thuyết nào cho ảnh này.</p>';
+    } else {
+        $("latex").textContent = latex;
+        $("render").textContent = "$$" + latex + "$$";
+        if (window.MathJax?.typesetPromise) {
+            // A partially-recognized expression is often invalid LaTeX (an
+            // unclosed brace, a stray ^). Say so rather than leaving the raw
+            // markup on screen looking like a rendering that never happened.
+            MathJax.typesetPromise([$("render")]).catch(() => {
+                $("render").innerHTML = '<p class="empty">Không dựng được công thức từ chuỗi LaTeX này.</p>';
             });
-            
-            // File upload logic
-            uploadArea.addEventListener('click', function() {
-                fileInput.click();
-            });
-            
-            uploadButton.addEventListener('click', function(e) {
-                e.stopPropagation();
-                fileInput.click();
-            });
-            
-            // Drag and drop
-            uploadArea.addEventListener('dragover', function(e) {
-                e.preventDefault();
-                uploadArea.style.borderColor = '#0d6efd';
-            });
-            
-            uploadArea.addEventListener('dragleave', function() {
-                uploadArea.style.borderColor = '#ccc';
-            });
-            
-            uploadArea.addEventListener('drop', function(e) {
-                e.preventDefault();
-                uploadArea.style.borderColor = '#ccc';
-                
-                if (e.dataTransfer.files.length) {
-                    fileInput.files = e.dataTransfer.files;
-                    handleFileSelect();
-                }
-            });
-            
-            // File selection handler
-            fileInput.addEventListener('change', handleFileSelect);
-            
-            function handleFileSelect() {
-                const file = fileInput.files[0];
-                if (!file) return;
-                
-                // Show image preview
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    previewImage.src = e.target.result;
-                    previewImage.style.display = 'block';
-                    updateProcessButton();
-                };
-                reader.readAsDataURL(file);
-            }
-            
-            // Process button state
-            function updateProcessButton() {
-                const hasFile = fileInput.files.length > 0;
-                const hasModelSelected = Array.from(modelCheckboxes).some(checkbox => checkbox.checked && !checkbox.disabled);
-                processButton.disabled = !(hasFile && hasModelSelected);
-            }
-            
-            // Process image
-            processButton.addEventListener('click', function() {
-                const file = fileInput.files[0];
-                if (!file) return;
-                
-                // Get selected models
-                const selectedModels = Array.from(modelCheckboxes)
-                    .filter(checkbox => checkbox.checked && !checkbox.disabled)
-                    .map(checkbox => checkbox.value);
-                
-                if (selectedModels.length === 0) {
-                    alert('Please select at least one available model');
-                    return;
-                }
-                
-                // Prepare form data
-                const formData = new FormData();
-                formData.append('file', file);
-                selectedModels.forEach(model => {
-                    formData.append('models', model);
-                });
-                
-                // Add CPU preference
-                formData.append('use_cpu', useCpuSwitch.checked);
-                
-                // Show loading, hide results
-                loading.style.display = 'block';
-                resultsContainer.style.display = 'none';
-                resultsContent.innerHTML = '';
-                
-                // Send request
-                fetch('/upload', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => response.json())
-                .then(data => {
-                    loading.style.display = 'none';
-                    resultsContainer.style.display = 'block';
-                    
-                    if (data.error) {
-                        showError(data.error);
-                        return;
-                    }
-                    
-                    // Display results for each model
-                    Object.keys(data).forEach(modelName => {
-                        const result = data[modelName];
-                        if (result.error) {
-                            showModelError(modelName, result.error);
-                        } else {
-                            showModelResult(modelName, result.latex);
-                        }
-                    });
-                    
-                    // Render math
-                    if (window.MathJax) {
-                        if (MathJax.typeset) {
-                            MathJax.typeset();
-                        } else if (MathJax.Hub) {
-                            MathJax.Hub.Queue(["Typeset", MathJax.Hub]);
-                        }
-                    }
-                })
-                .catch(error => {
-                    loading.style.display = 'none';
-                    showError('Network error: ' + error.message);
-                });
-            });
-            
-            function showError(message) {
-                const template = document.getElementById('error-template');
-                const clone = template.content.cloneNode(true);
-                clone.querySelector('.alert-danger').textContent = message;
-                resultsContent.appendChild(clone);
-            }
-            
-            function showModelError(modelName, error) {
-                const template = document.getElementById('result-template');
-                const clone = template.content.cloneNode(true);
-                clone.querySelector('.model-name').textContent = getModelDisplayName(modelName);
-                clone.querySelector('.latex-display').textContent = 'Error: ' + error;
-                clone.querySelector('.math-output').textContent = 'Unable to render';
-                resultsContent.appendChild(clone);
-            }
-            
-            function showModelResult(modelName, latex) {
-                const template = document.getElementById('result-template');
-                const clone = template.content.cloneNode(true);
-                clone.querySelector('.model-name').textContent = getModelDisplayName(modelName);
-                clone.querySelector('.latex-display').textContent = latex;
-                clone.querySelector('.math-output').innerHTML = '$$' + latex + '$$';
-                resultsContent.appendChild(clone);
-            }
-            
-            function getModelDisplayName(modelName) {
-                const names = {
-                    'swincomer': 'SwinCoMER Model'
-                };
-                return names[modelName] || modelName;
-            }
-        });
-    </script>
+        }
+    }
+    $("result").hidden = false;
+}
+
+$("copy").addEventListener("click", async () => {
+    try {
+        await navigator.clipboard.writeText($("latex").textContent);
+        $("copy").textContent = "Đã chép";
+        setTimeout(() => ($("copy").textContent = "Chép LaTeX"), 1500);
+    } catch {
+        // Clipboard is permission-gated. The LaTeX is on screen and
+        // selectable, so a failed copy is not worth an error state.
+    }
+});
+</script>
 </body>
-</html> 
+</html>

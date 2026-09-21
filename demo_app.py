@@ -1,115 +1,86 @@
-from flask import Flask, request, render_template, jsonify
-from werkzeug.utils import secure_filename
+"""SwinCoMER demo: upload a handwritten expression image, get LaTeX back.
+
+Run with `python demo_app.py`, then open http://localhost:5000.
+
+The checkpoint is not in this repository. Point CHECKPOINT (or the
+SWINCOMER_CHECKPOINT environment variable) at one before running, or the app
+will still start and tell you what is missing on the page rather than crashing.
+"""
 import os
 import sys
-import torch
+import time
 import traceback
-from PIL import Image
-import numpy as np
-import cv2
-from torchvision import transforms
 import uuid
-
-# Add all necessary module directories to path
-current_dir = os.path.abspath('.')
-sys.path.append(current_dir)
-sys.path.append(os.path.join(current_dir, 'SwinCoMER'))
-
-# Suppress PyTorch Lightning warnings (there are version mismatches)
 import warnings
+
+import cv2
+import numpy as np
+import torch
+from flask import Flask, jsonify, render_template, request
+from PIL import Image
+from torchvision import transforms
+from werkzeug.utils import secure_filename
+
+CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(CURRENT_DIR)
+sys.path.append(os.path.join(CURRENT_DIR, "SwinCoMER"))
+
+# PyTorch Lightning migrates the 1.x checkpoint format on load and is loud
+# about it. The migration itself is fine; the warnings are not actionable.
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Multiple.*ModelCheckpoint.*")
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Lightning automatically upgraded.*")
 
-# Track available models
-AVAILABLE_MODELS = {}
+CHECKPOINT = os.environ.get(
+    "SWINCOMER_CHECKPOINT",
+    "SwinCoMER/checkpoints/ComerSwin-epoch=02-val_ExpRate=0.4550.ckpt",
+)
 
-# Import models
+# Overrides the checkpoint's own beam_size (8) because inference here is far
+# more expensive than it should be: the encoder emits 6144 memory positions
+# instead of 8x8=64, so every cross-attention step does ~96x the intended work
+# (see the projection-layer note in SwinCoMER/comer/model/swin_encoder.py).
+# Measured on CPU with the bundled example image: beam 8 = 407s, 4 = 212s,
+# 2 = 107s, all three producing an identical result. Set to 0 to keep whatever
+# the checkpoint was saved with.
+BEAM_SIZE = int(os.environ.get("SWINCOMER_BEAM_SIZE", "2"))
+
+UPLOAD_FOLDER = "uploads"
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "bmp"}
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+# ── Model import ────────────────────────────────────────────────────────────
+# Imported at module level so an uninstalled package is reported once at
+# startup instead of on every request. A failure here is recorded, not raised:
+# the page must still load and explain what to install.
+IMPORT_ERROR = None
 try:
-    from SwinCoMER.comer.lit_comer_swin import LitCoMER as SwinCoMER_LitCoMER_Class
-    from SwinCoMER.comer.datamodule import vocab as SwinCoMER_vocab_module
-    AVAILABLE_MODELS['swincomer'] = True
-    print("SwinCoMER model is available")
-except ImportError as e:
-    AVAILABLE_MODELS['swincomer'] = False
-    print(f"Warning: SwinCoMER module not found or has errors: {str(e)}")
+    from SwinCoMER.comer.datamodule import vocab
+    from SwinCoMER.comer.lit_comer_swin import LitCoMER
+except Exception as exc:  # ImportError, or a dependency blowing up on import
+    LitCoMER = vocab = None
+    IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    print(f"WARNING: could not import SwinCoMER — {IMPORT_ERROR}")
+    print("Run: pip install -e ./SwinCoMER")
 
-if not any(AVAILABLE_MODELS.values()):
-    print("WARNING: No models are available. The app will run but won't be able to process images.")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+print(f"Checkpoint: {CHECKPOINT} ({'found' if os.path.isfile(CHECKPOINT) else 'NOT FOUND'})")
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'bmp'}
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Create uploads folder if it doesn't exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Loaded lazily on the first recognition so startup stays fast and a missing
+# checkpoint does not prevent the page from rendering its own diagnosis.
+_model = None
+_load_error = None
 
-# Model configurations
-MODEL_CONFIGS = {
-    'swincomer': {
-        'checkpoint': 'SwinCoMER/checkpoints/ComerSwin-epoch=02-val_ExpRate=0.4550.ckpt',
-        'loaded': False,
-        'model': None
-    }
-}
 
-# Check GPU availability
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+class ModelUnavailable(RuntimeError):
+    """The model cannot serve, with the reason a user can act on."""
 
-# Memory management function
-def clear_gpu_memory():
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        print(f"GPU memory usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB allocated, "
-              f"{torch.cuda.memory_reserved() / 1e9:.2f} GB reserved")
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
-
-def load_model(model_name, use_cpu=False):
-    """Load a specific model if not already loaded"""
-    # Check if model is available
-    if not AVAILABLE_MODELS.get(model_name, False):
-        print(f"Model {model_name} is not available")
-        return False
-
-    if MODEL_CONFIGS[model_name]['loaded']:
-        return True
-
-    try:
-        # Clear GPU memory before loading model
-        clear_gpu_memory()
-
-        # Determine device to use
-        target_device = torch.device('cpu') if use_cpu else device
-
-        if model_name == 'swincomer':
-            MODEL_CONFIGS[model_name]['model'] = SwinCoMER_LitCoMER_Class.load_from_checkpoint(
-                MODEL_CONFIGS[model_name]['checkpoint'],
-                map_location=target_device
-            )
-
-        MODEL_CONFIGS[model_name]['model'].eval()
-
-        # Move model to device if not already there
-        if not use_cpu and target_device.type == 'cuda':
-            try:
-                MODEL_CONFIGS[model_name]['model'].to(target_device)
-            except torch.cuda.OutOfMemoryError:
-                print(f"CUDA out of memory when moving {model_name} to GPU. Using CPU instead.")
-                MODEL_CONFIGS[model_name]['model'].to("cpu")
-
-        MODEL_CONFIGS[model_name]['loaded'] = True
-        print(f"Model {model_name} loaded successfully on {next(MODEL_CONFIGS[model_name]['model'].parameters()).device}")
-        return True
-    except Exception as e:
-        print(f"Error loading {model_name} model: {str(e)}")
-        traceback.print_exc()
-        return False
-
-# Image preprocessing functions for each model
+# ── Preprocessing ───────────────────────────────────────────────────────────
 #
 # The training pipeline (SwinCoMER/comer/datamodule/transforms.py) is:
 #   PIL.convert("L") -> np.array -> A.Resize(256, 256) -> ToTensorV2()
@@ -128,7 +99,7 @@ def load_model(model_name, use_cpu=False):
 MATCH_TRAINING_PREPROCESSING = True
 
 
-def preprocess_for_swincomer(img_path):
+def preprocess(img_path):
     if not MATCH_TRAINING_PREPROCESSING:
         # Legacy path: ImageNet-normalized RGB.
         img = Image.open(img_path).convert("RGB")
@@ -136,7 +107,7 @@ def preprocess_for_swincomer(img_path):
         img_tensor = transforms.functional.to_tensor(img_resized)
         normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
+            std=[0.229, 0.224, 0.225],
         )
         return normalize(img_tensor).unsqueeze(0)
 
@@ -146,109 +117,170 @@ def preprocess_for_swincomer(img_path):
     arr = np.array(img, dtype=np.uint8)
     arr = cv2.resize(arr, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-    img_tensor = torch.from_numpy(arr).float()   # [H, W], values in [0, 255]
+    img_tensor = torch.from_numpy(arr).float()            # [H, W] in [0, 255]
     img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)  # [3, H, W]
-    return img_tensor.unsqueeze(0)               # [1, 3, 256, 256]
+    return img_tensor.unsqueeze(0)                        # [1, 3, 256, 256]
 
-# Model inference functions
-def inference_swincomer(img_tensor):
-    model = MODEL_CONFIGS['swincomer']['model']
-    model_device = next(model.parameters()).device
-    img_tensor = img_tensor.to(model_device)
-    B, _, H, W = img_tensor.shape
-    img_mask = torch.zeros((B, H, W), dtype=torch.bool, device=model_device)
 
-    with torch.no_grad():
-        hyps = model.approximate_joint_search(img_tensor, img_mask)
-        if hyps:
-            best_hyp = hyps[0]
-            latex_str = SwinCoMER_vocab_module.indices2label(best_hyp.seq)
-            return latex_str
-        return "No result found"
+# ── Model ───────────────────────────────────────────────────────────────────
 
-@app.route('/')
-def index():
-    # Pass available models to the template
-    return render_template('index.html', available_models=AVAILABLE_MODELS)
+def clear_gpu_memory():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-@app.route('/available_models')
-def get_available_models():
-    """API endpoint to get available models"""
-    return jsonify(AVAILABLE_MODELS)
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
+def load_model(use_cpu=False):
+    """Restore the checkpoint once, then reuse it for every request."""
+    global _model, _load_error
 
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
+    if _model is not None:
+        return _model
 
-    if not file or not allowed_file(file.filename):
-        return jsonify({'error': 'File type not allowed'}), 400
+    if IMPORT_ERROR:
+        raise ModelUnavailable(
+            f"Chưa import được package 'comer' ({IMPORT_ERROR}). "
+            "Chạy: pip install -e ./SwinCoMER"
+        )
+    if not os.path.isfile(CHECKPOINT):
+        raise ModelUnavailable(
+            f"Không tìm thấy checkpoint tại '{CHECKPOINT}'. "
+            "Đặt biến môi trường SWINCOMER_CHECKPOINT trỏ tới file .ckpt."
+        )
 
-    # Get selected models
-    selected_models = request.form.getlist('models')
-    if not selected_models:
-        return jsonify({'error': 'No models selected'}), 400
+    target_device = torch.device("cpu") if use_cpu else DEVICE
+    try:
+        clear_gpu_memory()
+        # NOTE: LitCoMER builds SwinV2PretrainedEncoder with pretrained=True,
+        # so this downloads ImageNet weights and immediately overwrites them
+        # with the checkpoint's. Harmless but slow, and it makes the first
+        # start need network access.
+        model = LitCoMER.load_from_checkpoint(CHECKPOINT, map_location=target_device)
+        model.eval()
+        try:
+            model.to(target_device)
+        except torch.cuda.OutOfMemoryError:
+            print("CUDA out of memory moving the model to GPU — falling back to CPU.")
+            model.to("cpu")
+    except ModelUnavailable:
+        raise
+    except Exception as exc:
+        _load_error = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+        raise ModelUnavailable(f"Nạp checkpoint thất bại: {_load_error}") from exc
 
-    # Check if CPU mode is requested
-    use_cpu = request.form.get('use_cpu', 'false').lower() == 'true'
-    if use_cpu:
-        print("CPU mode enabled by user")
+    if BEAM_SIZE > 0:
+        # approximate_joint_search reads beam_size off hparams, so overriding
+        # it here is what actually takes effect at inference.
+        model.hparams.beam_size = BEAM_SIZE
 
-    # Filter out unavailable models
-    selected_models = [model for model in selected_models if AVAILABLE_MODELS.get(model, False)]
+    _model = model
+    _load_error = None
+    print(f"Model loaded on {next(model.parameters()).device} "
+          f"(beam_size={model.hparams.beam_size})")
+    return _model
 
-    if not selected_models:
-        return jsonify({'error': 'None of the selected models are available'}), 400
 
-    # Save the uploaded file with a unique filename
-    filename = str(uuid.uuid4()) + secure_filename(file.filename)
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(filepath)
+def recognize(img_path, use_cpu=False):
+    """Returns (latex, score, elapsed_ms, device).
 
-    results = {}
+    An empty beam gives an empty latex string — a real outcome, not an error.
+    The old demo returned the sentence "No result found" in the latex field,
+    which the page then tried to typeset as if it were a formula.
+    """
+    model = load_model(use_cpu)
+    started = time.perf_counter()
+
+    img = preprocess(img_path)
+    device = next(model.parameters()).device
+    img = img.to(device)
+
+    batch, _, height, width = img.shape
+    mask = torch.zeros((batch, height, width), dtype=torch.bool, device=device)
 
     try:
-        # Process with each selected model
-        for model_name in selected_models:
-            if model_name not in MODEL_CONFIGS:
-                results[model_name] = {'error': f'Unknown model: {model_name}'}
-                continue
+        with torch.no_grad():
+            hyps = model.approximate_joint_search(img, mask)
+    finally:
+        clear_gpu_memory()
 
-            # Load model if not loaded
-            if not load_model(model_name, use_cpu):
-                results[model_name] = {'error': f'Failed to load model: {model_name}'}
-                continue
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if not hyps:
+        return "", 0.0, elapsed_ms, str(device)
 
-            try:
-                # Clear GPU memory before processing each model
-                clear_gpu_memory()
+    best = hyps[0]
+    return vocab.indices2label(best.seq), float(best.score), elapsed_ms, str(device)
 
-                # Preprocess image according to model
-                if model_name == 'swincomer':
-                    img_tensor = preprocess_for_swincomer(filepath)
-                    latex = inference_swincomer(img_tensor)
 
-                results[model_name] = {'latex': latex}
-            except torch.cuda.OutOfMemoryError as e:
-                print(f"CUDA out of memory with {model_name}: {str(e)}")
-                results[model_name] = {'error': f'GPU out of memory. Try using CPU mode or one model at a time.'}
-            except Exception as e:
-                print(f"Error processing with {model_name}: {str(e)}")
-                traceback.print_exc()
-                results[model_name] = {'error': f'Processing error: {str(e)}'}
+# ── Routes ──────────────────────────────────────────────────────────────────
 
-    except Exception as e:
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/status")
+def status():
+    """Everything needed to explain why recognition is or is not working.
+
+    Reported before any image is sent, so a missing checkpoint shows up on
+    page load instead of being discovered by a failed upload.
+    """
+    return jsonify({
+        "import_ok": IMPORT_ERROR is None,
+        "import_error": IMPORT_ERROR,
+        "checkpoint": CHECKPOINT,
+        "checkpoint_exists": os.path.isfile(CHECKPOINT),
+        "loaded": _model is not None,
+        "beam_size": _model.hparams.beam_size if _model else BEAM_SIZE,
+        "device": str(next(_model.parameters()).device) if _model else None,
+        "cuda_available": torch.cuda.is_available(),
+        "last_error": _load_error,
+    })
+
+
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    if "file" not in request.files:
+        return jsonify({"error": "Không có file nào được gửi"}), 400
+
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "Chưa chọn file"}), 400
+    if not allowed_file(file.filename):
+        return jsonify({"error": "Chỉ chấp nhận ảnh PNG, JPG, BMP"}), 400
+
+    use_cpu = request.form.get("use_cpu", "false").lower() == "true"
+
+    filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    file.save(filepath)
+
+    try:
+        latex, score, elapsed_ms, device = recognize(filepath, use_cpu)
+    except ModelUnavailable as exc:
+        # 503, not 500: a missing checkpoint is a setup state, not a crash.
+        return jsonify({"error": str(exc)}), 503
+    except torch.cuda.OutOfMemoryError:
+        clear_gpu_memory()
+        return jsonify({"error": "GPU hết bộ nhớ. Bật chế độ CPU rồi thử lại."}), 507
+    except Exception as exc:
         traceback.print_exc()
-        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+        return jsonify({"error": f"Lỗi xử lý: {exc}"}), 500
 
-    # Clear GPU memory after processing all models
-    clear_gpu_memory()
+    return jsonify({
+        "latex": latex,
+        "score": score,
+        "elapsed_ms": elapsed_ms,
+        "device": device,
+        "filename": filename,
+    })
 
-    return jsonify(results)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    # debug=True enables the reloader, which imports this module twice and so
+    # loads the checkpoint twice. Off by default; set FLASK_DEBUG=1 to opt in.
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1")
